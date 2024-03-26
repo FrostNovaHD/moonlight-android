@@ -19,6 +19,7 @@ import android.preference.PreferenceFragment;
 import android.preference.PreferenceManager;
 import android.preference.PreferenceScreen;
 import android.util.DisplayMetrics;
+import android.util.Log;
 import android.util.Range;
 import android.view.Display;
 import android.view.DisplayCutout;
@@ -31,11 +32,12 @@ import com.limelight.LimeLog;
 import com.limelight.PcView;
 import com.limelight.R;
 import com.limelight.binding.video.MediaCodecHelper;
+import com.limelight.utils.AspectRatioConverter;
 import com.limelight.utils.Dialog;
 import com.limelight.utils.UiHelper;
 
 import java.lang.reflect.Method;
-import java.util.Arrays;
+import java.util.*;
 
 public class StreamSettings extends Activity {
     private PreferenceConfiguration previousPrefs;
@@ -187,6 +189,58 @@ public class StreamSettings extends Activity {
                 addNativeResolutionEntry(nativeHeight, nativeWidth, insetsRemoved, true);
             }
             addNativeResolutionEntry(nativeWidth, nativeHeight, insetsRemoved, false);
+        }
+        private void addCustomResolutionsEntries() {
+            SharedPreferences storage = this.getActivity().getSharedPreferences(CustomResolutionsConsts.CUSTOM_RESOLUTIONS_FILE, Context.MODE_PRIVATE);
+            Set<String> stored = storage.getStringSet(CustomResolutionsConsts.CUSTOM_RESOLUTIONS_KEY, null);
+            ListPreference pref = (ListPreference) findPreference(PreferenceConfiguration.RESOLUTION_PREF_STRING);
+
+            List<CharSequence> preferencesList = Arrays.asList(pref.getEntryValues());
+
+            if(stored == null) {
+                return;
+            };
+
+            Comparator<String> lengthComparator = new Comparator<String>() {
+                @Override
+                public int compare(String s1, String s2) {
+                    String[] s1Size = s1.split("x");
+                    String[] s2Size = s2.split("x");
+
+                    int w1 = Integer.parseInt(s1Size[0]);
+                    int w2 = Integer.parseInt(s2Size[0]);
+
+                    int h1 = Integer.parseInt(s1Size[1]);
+                    int h2 = Integer.parseInt(s2Size[1]);
+
+                    if(w1 == w2) {
+                        return Integer.compare(h1, h2);
+                    }
+                    return Integer.compare(w1, w2);
+                }
+            };
+
+            ArrayList<String> list = new ArrayList<>(stored);
+            Collections.sort(list, lengthComparator);
+
+            for (String storedResolution : list) {
+                if(preferencesList.contains(storedResolution)){
+                    continue;
+                }
+                String[] resolution = storedResolution.split("x");
+                int width = Integer.parseInt(resolution[0]);
+                int height = Integer.parseInt(resolution[1]);
+                String aspectRatio = AspectRatioConverter.getAspectRatio(width,height);
+                String displayText = "Custom ";
+
+                if(aspectRatio != null){
+                    displayText+=aspectRatio+" ";
+                }
+
+                displayText+="("+storedResolution+")";
+
+                appendPreferenceEntry(pref, displayText, storedResolution);
+            }
         }
 
         private void addNativeFrameRateEntry(float framerate) {
@@ -511,28 +565,14 @@ public class StreamSettings extends Activity {
                     // Never remove 720p
                 }
             }
-            else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
-                // On Android 4.2 and later, we can get the true metrics via the
-                // getRealMetrics() function (unlike the lies that getWidth() and getHeight()
-                // tell to us).
+            else {
+                // We can get the true metrics via the getRealMetrics() function (unlike the lies
+                // that getWidth() and getHeight() tell to us).
                 DisplayMetrics metrics = new DisplayMetrics();
                 display.getRealMetrics(metrics);
                 int width = Math.max(metrics.widthPixels, metrics.heightPixels);
                 int height = Math.min(metrics.widthPixels, metrics.heightPixels);
                 addNativeResolutionEntries(width, height, false);
-            }
-            else {
-                // On Android 4.1, we have to resort to reflection to invoke hidden APIs
-                // to get the real screen dimensions.
-                try {
-                    Method getRawHeightFunc = Display.class.getMethod("getRawHeight");
-                    Method getRawWidthFunc = Display.class.getMethod("getRawWidth");
-                    int width = (Integer) getRawWidthFunc.invoke(display);
-                    int height = (Integer) getRawHeightFunc.invoke(display);
-                    addNativeResolutionEntries(Math.max(width, height), Math.min(width, height), false);
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
             }
 
             if (!PreferenceConfiguration.readPreferences(this.getActivity()).unlockFps) {
@@ -562,49 +602,29 @@ public class StreamSettings extends Activity {
             }
             addNativeFrameRateEntry(maxSupportedFps);
 
-            // Android L introduces proper 7.1 surround sound support. Remove the 7.1 option
-            // for earlier versions of Android to prevent AudioTrack initialization issues.
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
-                LimeLog.info("Excluding 7.1 surround sound option based on OS");
-                removeValue(PreferenceConfiguration.AUDIO_CONFIG_PREF_STRING, "71", new Runnable() {
-                    @Override
-                    public void run() {
-                        setValue(PreferenceConfiguration.AUDIO_CONFIG_PREF_STRING, "51");
-                    }
-                });
-            }
-
             // Android L introduces the drop duplicate behavior of releaseOutputBuffer()
             // that the unlock FPS option relies on to not massively increase latency.
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
-                LimeLog.info("Excluding unlock FPS toggle based on OS");
-                PreferenceCategory category =
-                        (PreferenceCategory) findPreference("category_advanced_settings");
-                category.removePreference(findPreference("checkbox_unlock_fps"));
-            }
-            else {
-                findPreference(PreferenceConfiguration.UNLOCK_FPS_STRING).setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
-                    @Override
-                    public boolean onPreferenceChange(Preference preference, Object newValue) {
-                        // HACK: We need to let the preference change succeed before reinitializing to ensure
-                        // it's reflected in the new layout.
-                        final Handler h = new Handler();
-                        h.postDelayed(new Runnable() {
-                            @Override
-                            public void run() {
-                                // Ensure the activity is still open when this timeout expires
-                                StreamSettings settingsActivity = (StreamSettings)SettingsFragment.this.getActivity();
-                                if (settingsActivity != null) {
-                                    settingsActivity.reloadSettings();
-                                }
+            findPreference(PreferenceConfiguration.UNLOCK_FPS_STRING).setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
+                @Override
+                public boolean onPreferenceChange(Preference preference, Object newValue) {
+                    // HACK: We need to let the preference change succeed before reinitializing to ensure
+                    // it's reflected in the new layout.
+                    final Handler h = new Handler();
+                    h.postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            // Ensure the activity is still open when this timeout expires
+                            StreamSettings settingsActivity = (StreamSettings) SettingsFragment.this.getActivity();
+                            if (settingsActivity != null) {
+                                settingsActivity.reloadSettings();
                             }
-                        }, 500);
+                        }
+                    }, 500);
 
-                        // Allow the original preference change to take place
-                        return true;
-                    }
-                });
-            }
+                    // Allow the original preference change to take place
+                    return true;
+                }
+            });
 
             // Remove HDR preference for devices below Nougat
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
@@ -623,6 +643,7 @@ public class StreamSettings extends Activity {
                     for (int hdrType : hdrCaps.getSupportedHdrTypes()) {
                         if (hdrType == Display.HdrCapabilities.HDR_TYPE_HDR10) {
                             foundHdr10 = true;
+                            break;
                         }
                     }
                 }
@@ -700,6 +721,8 @@ public class StreamSettings extends Activity {
                     return true;
                 }
             });
+
+            addCustomResolutionsEntries();
         }
     }
 }
